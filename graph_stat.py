@@ -4,10 +4,10 @@ import numpy as np
 import powerlaw
 import scipy.sparse as sp
 from scipy.sparse.csgraph import connected_components, minimum_spanning_tree
+
+
 # import matplotlib.pyplot as plt
 # plt.switch_backend('agg')
-
-
 
 
 def statistics_degrees(A_in):
@@ -155,7 +155,7 @@ def statistics_power_law_alpha(A_in):
     """
 
     degrees = A_in.sum(axis=0).flatten()
-    return powerlaw.Fit(degrees, xmin=max(np.min(degrees),1)).power_law.alpha
+    return powerlaw.Fit(degrees, xmin=max(np.min(degrees), 1)).power_law.alpha
 
 
 def statistics_gini(A_in):
@@ -176,7 +176,7 @@ def statistics_gini(A_in):
     degrees = A_in.sum(axis=0).flatten()
     degrees_sorted = np.sort(degrees)
     G = (2 * np.sum(np.array([i * degrees_sorted[i] for i in range(len(degrees))]))) / (n * np.sum(degrees)) - (
-                                                                                                               n + 1) / n
+            n + 1) / n
     return float(G)
 
 
@@ -198,7 +198,7 @@ def statistics_edge_distribution_entropy(A_in):
     m = 0.5 * np.sum(np.square(A_in))
     n = A_in.shape[0]
 
-    H_er = 1 / np.log(n) * np.sum(-degrees / (2 * float(m)) * np.log((degrees+.0001) / (2 * float(m))))
+    H_er = 1 / np.log(n) * np.sum(-degrees / (2 * float(m)) * np.log((degrees + .0001) / (2 * float(m))))
     return H_er
 
 
@@ -238,7 +238,7 @@ def compute_graph_statistics(A_in, Z_obs=None):
     """
     A = A_in.copy()
 
-    assert((A == A.T).all())
+    assert ((A == A.T).all())
     A_graph = nx.from_numpy_matrix(A).to_undirected()
 
     statistics = {}
@@ -283,7 +283,7 @@ def compute_graph_statistics(A_in, Z_obs=None):
     statistics['assortativity'] = nx.degree_assortativity_coefficient(A_graph)
 
     # Clustering coefficient
-    statistics['clustering_coefficient'] = 3 * statistics['triangle_count'] / (statistics['claw_count']+1)
+    statistics['clustering_coefficient'] = 3 * statistics['triangle_count'] / (statistics['claw_count'] + 1)
 
     # Number of connected components
     statistics['n_components'] = connected_components(A)[0]

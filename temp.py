@@ -8,52 +8,89 @@ import torch.nn as nn
 from torch.autograd import Variable
 from collections import defaultdict
 
-from tqdm import tqdm
-
 from graph_stat import *
 from options import Options
 from GVGAN import *
 from utils import *
 import pprint
 
-from data_helper import create_graphs
-
-from classifier.GraphSAGE import GraphSAGE
-from classifier.DiffPool import DiffPool
-from classifier.DGCNN import DGCNN
-
-import math
-
 warnings.filterwarnings("ignore")
 
 
-class Bunch:
-    def __init__(self, **kwds):
-        self.__dict__.update(kwds)
+def load_data(DATA_DIR):
+    # script for loading NWE dblp
+    # folder structure
+    # - this.ipynb
+    # - $DATA_DIR - *.txt
 
+    mat_names = []  # e.g. GSE_2304
+    adj_mats = []  # essential data, type: list(np.ndarray)
+    attr_vecs = []  # essential data, type: list(np.ndarray)
+    id_maps = []  # map index to gene name if you need
 
-def load_data(graph_type):
-    graphs = create_graphs(graph_type)
+    for f in os.listdir(DATA_DIR):
+        if not f.startswith(('nodes', 'links', 'attrs')):
+            continue
+        else:
+            mat_names.append('_'.join(f.split('.')[0].split('_')[1:]))
+    mat_names = sorted([it for it in set(mat_names)])
+    print('Test length', len(mat_names))
+    for mat_name in mat_names:
+        node_file = 'nodes_' + mat_name + '.txt'
+        link_file = 'links_' + mat_name + '.txt'
+        attr_file = 'attrs_' + mat_name + '.txt'
+        node_file_path = os.path.join(DATA_DIR, node_file)
+        link_file_path = os.path.join(DATA_DIR, link_file)
+        attr_file_path = os.path.join(DATA_DIR, attr_file)
 
-    train_graphs = graphs[:int(len(graphs) * 0.8)]
-    test_graphs = graphs[int(len(graphs) * 0.8):]
+        id_to_item = {}
+        with open(node_file_path, 'r') as f:
+            for i, line in enumerate(f):
+                author = line.rstrip('\n')
+                id_to_item[i] = author
+        all_ids = set(id_to_item.keys())
 
-    train_adj_mats = [nx.linalg.graphmatrix.adjacency_matrix(G).todense() for G in train_graphs]
-    train_attr_vecs = []
+        with open(attr_file_path, 'r') as f:
+            attr_vec = np.loadtxt(f).T.flatten()
+            attr_vecs.append(attr_vec)
 
-    for G in train_graphs:
-        attr_vec = np.zeros(2)
-        attr_vec[G.graph['label'] - 1] = 1
-        train_attr_vecs.append(attr_vec)
+        links = defaultdict(set)
+        with open(link_file_path, 'r') as f:
+            for line in f:
+                cells = line.rstrip('\n').split(',')
+                from_id = int(cells[0])
+                to_id = int(cells[1])
+                if from_id in all_ids and to_id in all_ids:
+                    links[from_id].add(to_id)
 
-    test_adj_mats = [nx.linalg.graphmatrix.adjacency_matrix(G).todense() for G in test_graphs]
-    test_attr_vecs = []
+        N = len(all_ids)
+        adj = np.zeros((N, N))
+        for from_id in range(N):
+            for to_id in links[from_id]:
+                adj[from_id, to_id] = 1
+                adj[to_id, from_id] = 1
 
-    for G in test_graphs:
-        attr_vec = np.zeros(2)
-        attr_vec[G.graph['label'] - 1] = 1
-        test_attr_vecs.append(attr_vec)
+        adj -= np.diag(np.diag(adj))
+        id_map = [id_to_item[i] for i in range(N)]
 
+        # Remove small component
+        # adj = remove_small_conns(adj, keep_min_conn=4)
+
+        # Keep large component
+        adj = keep_topk_conns(adj, k=1)
+        adj_mats.append(adj)
+        id_maps.append(id_map)
+
+        if int(np.sum(adj)) == 0:
+            adj_mats.pop(-1)
+            id_maps.pop(-1)
+            mat_names.pop(-1)
+            attr_vecs.pop(-1)
+
+    train_adj_mats = adj_mats[:int(len(adj_mats) * .8)]
+    test_adj_mats = adj_mats[int(len(adj_mats) * .8):]
+    train_attr_vecs = attr_vecs[:int(len(attr_vecs) * .8)]
+    test_attr_vecs = attr_vecs[int(len(attr_vecs) * .8):]
     return train_adj_mats, test_adj_mats, train_attr_vecs, test_attr_vecs
 
 
@@ -66,7 +103,7 @@ def train(train_adj_mats, test_adj_mats, train_attr_vecs, test_attr_vecs, opt=No
         # g_loss_list, rec_loss_list, prior_loss_list = [], [], []
         g_loss_list, rec_loss_list, prior_loss_list, aa_loss_list = [], [], [], []
         random.shuffle(training_index)
-        for i in tqdm(training_index):
+        for i in training_index:
 
             ones_label = Variable(torch.ones(1)).cuda()
             zeros_label = Variable(torch.zeros(1)).cuda()
@@ -191,124 +228,26 @@ def train(train_adj_mats, test_adj_mats, train_attr_vecs, test_attr_vecs, opt=No
                  torch.mean(torch.stack(rec_loss_list)),
                  torch.mean(torch.stack(prior_loss_list))))
 
-        torch.save({'G_state_dict': G.state_dict(), 'D_state_dict': D.state_dict()}, 'my_model.pkl')
-
-    print('Training set')
-    for i in range(3):
-        base_adj = train_adj_mats[i]
-
-        if base_adj.shape[0] <= opt.d_size:
-            continue
-        print('Base Adj_size: ', base_adj.shape)
-        attr_vec = Variable(torch.from_numpy(train_attr_vecs[i]).float()).cuda()
-
-        # add a new line
-        G.set_attr_vec(attr_vec)
-
-        print('Show sample')
-        sample_adj = gen_adj(G, base_adj.shape[0], int(np.sum(base_adj)) // 2, attr_vec, z_size=opt.z_size)
+    torch.save({'G_state_dict': G.state_dict(), 'D_state_dict': D.state_dict()}, 'my_model.pkl')
 
 
-def test(train_adj_mats, test_adj_mats, train_attr_vecs, test_attr_vecs):
-    checkpoint = torch.load('my_model.pkl')
-    G.load_state_dict(checkpoint['G_state_dict'])
-    D.load_state_dict(checkpoint['D_state_dict'])
+# print('Training set')
+# for i in range(3):
+# 	base_adj = train_adj_mats[i]
 
-    keys = ['LCC', 'cpl', 'gini', 'triangle_count', 'd_max']
+# 	if base_adj.shape[0] <= opt.d_size:
+# 		continue
+# 	print('Base Adj_size: ', base_adj.shape)
+# 	attr_vec = Variable(torch.from_numpy(train_attr_vecs[i]).float()).cuda()
 
-    classifier1 = GraphSAGE(410, 2, 3, 32, 'add').cuda()
-    classifier1.load_state_dict(torch.load('output/MODEL_GRIDVSTREE_GRAPHSAGE_ALL.pkl'))
+# 	# add a new line
+# 	G.set_attr_vec(attr_vec)
 
-    classifier2 = DiffPool(410, 2, max_num_nodes=410).cuda()
-    classifier2.load_state_dict(torch.load('output/MODEL_GRIDVSTREE_DIFFPOOL_ALL.pkl'))
+# 	print('Show sample')
+# 	sample_adj = gen_adj(G, base_adj.shape[0], int(np.sum(base_adj)) // 2, attr_vec, z_size=opt.z_size)
 
-    classifier3 = DGCNN(410, 2, 'PROTEINS_full').cuda()
-    classifier3.load_state_dict(torch.load('output/MODEL_GRIDVSTREE_DGCNN_ALL.pkl'))
 
-    classifiers = [classifier1, classifier2, classifier3]
-
-    acc_count_by_label = {graph_classifier: {0: 0, 1: 0} for graph_classifier in classifiers}
-    original_stats_by_label = {}
-    stats_by_label = {}
-    counts_by_label = {}
-
-    # Iterate through both datasets 100 times
-    for epoch in range(300):
-        for i in range(len(train_adj_mats)):
-            base_adj = train_adj_mats[i]
-
-            label = 0
-            if train_attr_vecs[i][-1] == 1:
-                label = 1
-
-            attr_vec = Variable(torch.from_numpy(train_attr_vecs[i]).float()).cuda()
-            G.set_attr_vec(attr_vec)
-
-            sample_adj = gen_adj(G, base_adj.shape[0], int(np.sum(base_adj)) // 2, attr_vec, z_size=opt.z_size).detach().cpu().numpy()
-
-            original_stats = compute_graph_statistics(base_adj)
-            sample_stats = compute_graph_statistics(sample_adj)
-
-            sample_adj_tensor = torch.tensor(sample_adj).cuda()
-            x = torch.eye(sample_adj_tensor.shape[0], 410).cuda()
-            lower_part = torch.tril(sample_adj_tensor, diagonal=-1)
-            edge_mask = (lower_part != 0).cuda()
-            edges = edge_mask.nonzero().transpose(0, 1).cuda()
-            edges_other_way = edges[[1, 0]]
-            edges = torch.cat([edges, edges_other_way], dim=-1).cuda()
-            batch = torch.zeros(sample_adj_tensor.shape[0]).long().cuda()
-            graph_label = torch.tensor([label]).to('cuda').long().cuda()
-
-            data = Bunch(x=x, edge_index=edges, batch=batch, y=graph_label, edge_weight=None)
-
-            for graph_classifier in classifiers:
-                output = graph_classifier(data)
-
-                if output[0, label] > output[0, 1 - label]:
-                    graph_classification_acc = 1
-                else:
-                    graph_classification_acc = 0
-
-                acc_count_by_label[graph_classifier][label] += graph_classification_acc
-
-            if label not in stats_by_label.keys():
-                original_stats_by_label[label] = {key: 0 for key in keys}
-                stats_by_label[label] = {key: 0 for key in keys}
-                counts_by_label[label] = 0
-
-            has_nan = False
-            for key in keys:
-                if math.isnan(sample_stats[key]):
-                    has_nan = True
-                    break
-            if has_nan:
-                continue
-
-            for key in keys:
-                original_stats_by_label[label][key] += original_stats[key]
-                stats_by_label[label][key] += sample_stats[key]
-            counts_by_label[label] += 1
-
-            # if i % 150 == 1:
-            #     print("(" * 30)
-            #     print(label)
-            #     show_graph(sample_adj, base_adj=base_adj, remove_isolated=True)
-            #     print(")" * 30)
-
-        if epoch % 2 < 3:
-            for label in original_stats_by_label.keys():
-                print(label, {x: original_stats_by_label[label][x] / counts_by_label[label] for x in original_stats_by_label[label].keys()})
-            print('-' * 20)
-            for label in stats_by_label.keys():
-                print(label, {x: stats_by_label[label][x] / counts_by_label[label] for x in stats_by_label[label].keys()})
-            print("=" * 20)
-            for graph_classifier in acc_count_by_label.keys():
-                class_0_graphs = counts_by_label[0]
-                class_1_graphs = counts_by_label[1]
-                print("Class 0: %.3f ----  Class 1: %.3f" % (
-                    acc_count_by_label[graph_classifier][0] / class_0_graphs, acc_count_by_label[graph_classifier][1] / class_1_graphs))
-            print("/" * 20)
-
+# show_graph(sample_adj, base_adj=base_adj, remove_isolated=True)
 
 if __name__ == '__main__':
     print('=========== OPTIONS ===========')
@@ -317,10 +256,8 @@ if __name__ == '__main__':
 
     os.environ['CUDA_VISIBLE_DEVICES'] = opt.gpu
 
-    train_adj_mats, test_adj_mats, train_attr_vecs, test_attr_vecs = load_data('GridVSTree')
+    train_adj_mats, test_adj_mats, train_attr_vecs, test_attr_vecs = load_data(
+        DATA_DIR=opt.DATA_DIR)
 
     # output_dir = opt.output_dir
     train(train_adj_mats, test_adj_mats, train_attr_vecs, test_attr_vecs, opt=opt)
-
-    # test(train_adj_mats + test_adj_mats, test_adj_mats, train_attr_vecs + test_attr_vecs, test_attr_vecs)
-
